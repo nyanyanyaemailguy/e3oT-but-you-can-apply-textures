@@ -48,164 +48,161 @@
       
       this.loadThreeJS();
       this.loadCannonJS();
+      // constructor の中に追記
+      this.lightingMode = 'default'; // default, wolf3D, none
     }
 
-getTextureTargetMeshes(object) {
-  if (!object) return [];
+setLightingMode(args) {
+    this.lightingMode = args.MODE;
+    
+    if (!this.isInitialized) return;
 
-  const meshes = [];
-  if (object instanceof THREE.Mesh) {
-    meshes.push(object);
-    return meshes;
-  }
+    // モードに応じてライトの有効・無効を切り替え
+    const ambientLight = this.lights.get(2);
+    const directionalLight = this.lights.get(1);
 
-  if (object.traverse) {
-    object.traverse((child) => {
-      if (child instanceof THREE.Mesh) meshes.push(child);
+    if (this.lightingMode === 'none') {
+        // すべてなし：環境光を最大にして影を消す
+        if (ambientLight) ambientLight.intensity = 1.5;
+        if (directionalLight) directionalLight.intensity = 0;
+    } else if (this.lightingMode === 'wolf3D') {
+        // Wolf3D：ライトによる計算は切る（自前で計算するため）
+        if (ambientLight) ambientLight.intensity = 1.0;
+        if (directionalLight) directionalLight.intensity = 0;
+    } else {
+        // 通常：初期設定に戻す
+        if (ambientLight) ambientLight.intensity = 0.6;
+        if (directionalLight) directionalLight.intensity = 1.2;
+    }
+}
+
+// 描画ループで毎フレーム呼び出すWolf3Dライティング計算
+updateWolf3DLighting() {
+    if (this.lightingMode !== 'wolf3D') return;
+
+    this.objects.forEach((obj) => {
+        obj.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material && child.material.color) {
+                // 面の法線ベクトル（向き）を取得
+                const normalMatrix = new THREE.Matrix3().getNormalMatrix(child.matrixWorld);
+                
+                // 元の色を保持していない場合は保持する（色の復元用）
+                if (!child.userData.originalColor) {
+                    child.userData.originalColor = child.material.color.clone();
+                }
+
+                // Wolf3Dライティング: 南北方向(Z軸面)を少し暗くする
+                // 法線ベクトルからどの方向を向いているか判定
+                const worldNormal = new THREE.Vector3(0, 0, 1).applyMatrix3(normalMatrix).normalize();
+                
+                // Z方向（南北）を向いている面の明るさを落とす（0.7倍など）
+                const shade = Math.abs(worldNormal.z) > 0.5 ? 0.7 : 1.0;
+                
+                child.material.color.copy(child.userData.originalColor).multiplyScalar(shade);
+            }
+        });
     });
-  }
-
-  return meshes;
 }
 
-getTextureRepeatForGeometry(geometry, mesh) {
-  const geoType = geometry?.type || '';
-  const scale = mesh?.scale || { x: 1, y: 1, z: 1 };
+rotateCamera(args) {
+  if (!this.isInitialized || !this.camera) return;
 
-  // ざっくり「無理やり引き延ばす」用の repeat
-  // 立方体・平面はそれっぽく全体に伸ばす
-  if (geoType === 'BoxGeometry' || geoType === 'BoxBufferGeometry') {
-    return { x: 1, y: 1 };
+  const direction = args.DIRECTION;
+  const degrees = Scratch.Cast.toNumber(args.DEGREES);
+  const radians = (degrees * Math.PI) / 180;
+
+  // 回転順序を YXZ に固定（FPS/TPS操作の基本）
+  this.camera.rotation.order = 'YXZ';
+
+  if (direction === 'left') {
+    this.camera.rotation.y += radians;
+  } else if (direction === 'right') {
+    this.camera.rotation.y -= radians;
+  } else if (direction === 'up') {
+    this.camera.rotation.x += radians;
+  } else if (direction === 'down') {
+    this.camera.rotation.x -= radians;
   }
 
-  if (geoType === 'PlaneGeometry' || geoType === 'PlaneBufferGeometry') {
-    return { x: 1, y: 1 };
-  }
+  // 回転の制限（真上・真下を向いた時のバグ防止）
+  this.camera.rotation.x = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, this.camera.rotation.x));
 
-  if (geoType === 'SphereGeometry' || geoType === 'SphereBufferGeometry') {
-    return { x: 1, y: 1 };
-  }
+  this.camera.updateMatrixWorld();
 
-  if (geoType === 'CylinderGeometry' || geoType === 'CylinderBufferGeometry') {
-    // 円柱だけそれっぽく回り込ませる
-    return { x: Math.max(1, Math.abs(scale.x)), y: Math.max(1, Math.abs(scale.y)) };
+  if (this.controls) {
+    // ターゲットをカメラのかなり前方（100ユニット先）に投影して、
+    // OrbitControlsの視点を強制的に同期させる
+    const lookAtVector = new THREE.Vector3(0, 0, -100);
+    lookAtVector.applyQuaternion(this.camera.quaternion);
+    lookAtVector.add(this.camera.position);
+    
+    this.controls.target.copy(lookAtVector);
+    this.controls.update();
   }
+}
+moveCameraForward(args) {
+  if (!this.isInitialized || !this.camera) return;
 
-  return { x: 1, y: 1 };
+  const steps = Scratch.Cast.toNumber(args.STEPS);
+  const direction = new THREE.Vector3();
+  
+  // 最新の回転状態を反映した向きを取得
+  this.camera.getWorldDirection(direction);
+
+  // 位置の更新
+  this.camera.position.addScaledVector(direction, steps);
+
+  if (this.controls) {
+    // ターゲットも移動ベクトルと同じ分だけ平行移動させる
+    // これにより、旋回しながらの移動がスムーズになります
+    this.controls.target.addScaledVector(direction, steps);
+    this.controls.update();
+  }
 }
 
-async setObjectTexture(args) {
-  await this.init();
-  if (!this.isInitialized || typeof THREE === 'undefined') return;
+async addBillboard(args) {
+      if (!this.isInitialized || typeof THREE === 'undefined') return;
 
-  const id = Scratch.Cast.toNumber(args.ID);
-  const url = Scratch.Cast.toString(args.URL);
-  const obj = this.objects.get(id);
+      const id = Scratch.Cast.toNumber(args.ID);
+      const url = Scratch.Cast.toString(args.URL);
 
-  if (!obj) {
-    console.warn('Object not found:', id);
-    return;
-  }
-
-  const meshes = this.getTextureTargetMeshes(obj);
-  if (meshes.length === 0) {
-    console.warn('No mesh found for object:', id);
-    return;
-  }
-
-  const loader = new THREE.TextureLoader();
-
-  loader.load(
-    url,
-    (texture) => {
-      // 画質が気になるならここを調整
-      texture.needsUpdate = true;
-      texture.flipY = false;
-
-      // 画像の向きが気になる時用
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-
-      for (const mesh of meshes) {
-        if (!mesh.material) continue;
-
-        // マテリアルが配列のこともあるので両対応
-        const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-
-        for (let i = 0; i < materials.length; i++) {
-          const mat = materials[i];
-          if (!mat) continue;
-
-          const newMat = mat.clone();
-          newMat.map = texture.clone();
-          newMat.map.needsUpdate = true;
-
-          // 「無理やり引き延ばす」寄りの見え方にする
-          const repeat = this.getTextureRepeatForGeometry(mesh.geometry, mesh);
-          newMat.map.repeat.set(repeat.x, repeat.y);
-          newMat.map.offset.set(0, 0);
-          newMat.map.center.set(0.5, 0.5);
-
-          // 立方体・平面の見た目を自然寄りに
-          newMat.transparent = mat.transparent;
-          newMat.opacity = mat.opacity;
-
-          // 光の影響が要るなら Phong のままでOK
-          // そのまま差し替え
-          materials[i] = newMat;
-        }
-
-        mesh.material = Array.isArray(mesh.material) ? materials : materials[0];
-        mesh.material.needsUpdate = true;
+      // 既存のオブジェクトがあれば削除
+      if (this.objects.has(id)) {
+        const oldObj = this.objects.get(id);
+        this.scene.remove(oldObj);
       }
 
-      console.log(`オブジェクト ${id} にテクスチャを貼りました`);
-    },
-    undefined,
-    (error) => {
-      console.error('Texture load error:', error);
-    }
-  );
-}
+      try {
+        const loader = new THREE.TextureLoader();
+        loader.setCrossOrigin('anonymous');
 
-async clearObjectTexture(args) {
-  await this.init();
-  if (!this.isInitialized || typeof THREE === 'undefined') return;
+        const texture = await new Promise((resolve, reject) => {
+          loader.load(url, resolve, undefined, reject);
+        });
 
-  const id = Scratch.Cast.toNumber(args.ID);
-  const obj = this.objects.get(id);
+        // ドット絵などをくっきりさせたい場合の設定
+        texture.magFilter = THREE.NearestFilter;
+        texture.minFilter = THREE.NearestFilter;
 
-  if (!obj) {
-    console.warn('Object not found:', id);
-    return;
-  }
+        const material = new THREE.SpriteMaterial({ 
+          map: texture,
+          transparent: true // 基本的にビルボードは透過ありを想定
+        });
+        
+        const sprite = new THREE.Sprite(material);
 
-  const meshes = this.getTextureTargetMeshes(obj);
-  if (meshes.length === 0) return;
+        // 画像の解像度に合わせて初期スケールを調整（高さ1を基準に横幅を決める）
+        const aspectRatio = texture.image.width / texture.image.height;
+        sprite.scale.set(aspectRatio, 1, 1);
 
-  for (const mesh of meshes) {
-    if (!mesh.material) continue;
+        this.scene.add(sprite);
+        this.objects.set(id, sprite);
 
-    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-
-    for (let i = 0; i < materials.length; i++) {
-      const mat = materials[i];
-      if (!mat) continue;
-
-      const newMat = mat.clone();
-      if (newMat.map) {
-        newMat.map.dispose?.();
-        newMat.map = null;
+        console.log(`ビルボード ${id} を作成しました (比率: ${aspectRatio})`);
+      } catch (error) {
+        console.error(`ビルボードのテクスチャ読み込みに失敗しました: ${url}`, error);
       }
-      newMat.needsUpdate = true;
-      materials[i] = newMat;
     }
-
-    mesh.material = Array.isArray(mesh.material) ? materials : materials[0];
-  }
-
-  console.log(`オブジェクト ${id} のテクスチャを外しました`);
-}
 
     async loadThreeJS() {
       if (typeof THREE !== 'undefined') {
@@ -269,6 +266,46 @@ async clearObjectTexture(args) {
         };
         document.head.appendChild(script);
       });
+    }
+
+setTextureMode(args) {
+      if (!this.isInitialized) return;
+      
+      const id = Scratch.Cast.toNumber(args.ID);
+      const mode = args.MODE;
+      const obj = this.objects.get(id);
+      
+      if (!obj || !obj.isMesh || !obj.material.map) {
+        console.warn(`オブジェクト ${id} にテクスチャが貼られていないか、対象外のオブジェクトです。`);
+        return;
+      }
+
+      const texture = obj.material.map;
+
+      // 繰り返しモードの判定
+      if (mode === 'repeat') {
+        // オブジェクトのスケールを確認（小さすぎるとキモくなるのでガード）
+        // x, y, z いずれかが 0.5 未満なら「小さすぎる」と判定して強制引き延ばし
+        const isTooSmall = obj.scale.x < 0.5 || obj.scale.y < 0.5 || obj.scale.z < 0.5;
+
+        if (isTooSmall) {
+          console.log(`オブジェクト ${id} が小さすぎるため、引き延ばしモードを維持します。`);
+          texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+          texture.repeat.set(1, 1);
+        } else {
+          // 繰り返し設定
+          texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+          // スケールに合わせてリピート数を変える（お好みで 1, 1 固定でもOK）
+          texture.repeat.set(Math.floor(obj.scale.x), Math.floor(obj.scale.y || obj.scale.z));
+        }
+      } else {
+        // デフォルト：引き延ばし
+        texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+        texture.repeat.set(1, 1);
+      }
+
+      texture.needsUpdate = true;
+      obj.material.needsUpdate = true;
     }
 
     async waitForThreeJS() {
@@ -337,6 +374,18 @@ async clearObjectTexture(args) {
             blockType: Scratch.BlockType.COMMAND,
             text: '3Dを初期化する'
           },
+{
+  opcode: 'setLightingMode',
+  blockType: Scratch.BlockType.COMMAND,
+  text: 'ライティングの種類を [MODE] にする',
+  arguments: {
+    MODE: {
+      type: Scratch.ArgumentType.STRING,
+      menu: 'lightingModes',
+      defaultValue: 'default'
+    }
+  }
+},
           '---',
           {
             opcode: 'addCube',
@@ -406,33 +455,53 @@ async clearObjectTexture(args) {
               }
             }
           },
+{
+            opcode: 'addBillboard',
+            blockType: Scratch.BlockType.COMMAND,
+            text: 'ビルボードを作成 ID:[ID] URL:[URL]',
+            arguments: {
+              ID: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 1
+              },
+              URL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: 'https://example.com/character.png'
+              }
+            }
+          },
+{
+            opcode: 'setObjectTexture',
+            blockType: Scratch.BlockType.COMMAND,
+            text: 'オブジェクト [ID] にテクスチャ [URL] を貼る',
+            arguments: {
+              ID: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 1
+              },
+              URL: {
+                type: Scratch.ArgumentType.STRING,
+                defaultValue: 'https://example.com/texture.png'
+              }
+            }
+          },
+{
+            opcode: 'setTextureMode',
+            blockType: Scratch.BlockType.COMMAND,
+            text: 'オブジェクト [ID] のテクスチャモードを [MODE] にする',
+            arguments: {
+              ID: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 1
+              },
+              MODE: {
+                type: Scratch.ArgumentType.STRING,
+                menu: 'textureModes',
+                defaultValue: 'stretch'
+              }
+            }
+          },
           '---',
-{
-  opcode: 'setObjectTexture',
-  blockType: Scratch.BlockType.COMMAND,
-  text: 'オブジェクト [ID] にテクスチャ [URL] を貼る',
-  arguments: {
-    ID: {
-      type: Scratch.ArgumentType.NUMBER,
-      defaultValue: 1
-    },
-    URL: {
-      type: Scratch.ArgumentType.STRING,
-      defaultValue: 'https://example.com/texture.png'
-    }
-  }
-},
-{
-  opcode: 'clearObjectTexture',
-  blockType: Scratch.BlockType.COMMAND,
-  text: 'オブジェクト [ID] のテクスチャを外す',
-  arguments: {
-    ID: {
-      type: Scratch.ArgumentType.NUMBER,
-      defaultValue: 1
-    }
-  }
-},
           {
             opcode: 'loadModelFile',
             blockType: Scratch.BlockType.COMMAND,
@@ -1007,6 +1076,33 @@ async clearObjectTexture(args) {
               }
             }
           },
+{
+            opcode: 'moveCameraForward',
+            blockType: Scratch.BlockType.COMMAND,
+            text: 'カメラを向いている方向に [STEPS] 歩進める',
+            arguments: {
+              STEPS: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 1
+              }
+            }
+          },
+{
+            opcode: 'rotateCamera',
+            blockType: Scratch.BlockType.COMMAND,
+            text: 'カメラを [DIRECTION] に [DEGREES] 度回す',
+            arguments: {
+              DIRECTION: {
+                type: Scratch.ArgumentType.STRING,
+                menu: 'rotateMenu',
+                defaultValue: 'left'
+              },
+              DEGREES: {
+                type: Scratch.ArgumentType.NUMBER,
+                defaultValue: 15
+              }
+            }
+          },
           {
             opcode: 'setCameraRotation',
             blockType: Scratch.BlockType.COMMAND,
@@ -1267,6 +1363,24 @@ async clearObjectTexture(args) {
           }
         ],
         menus: {
+lightingModes: {
+  acceptReporters: false,
+  items: [
+    { text: '通常', value: 'default' },
+    { text: 'Wolf3D風', value: 'wolf3D' },
+    { text: 'なし (すべて明るい)', value: 'none' }
+  ]
+},
+
+rotateMenu: {
+            acceptReporters: false,
+            items: [
+              { text: '左', value: 'left' },
+              { text: '右', value: 'right' },
+              { text: '上', value: 'up' },
+              { text: '下', value: 'down' }
+            ]
+          },
           depthModes: {
             acceptReporters: false,
             items: [
@@ -1286,6 +1400,13 @@ async clearObjectTexture(args) {
               { text: 'ハードライト', value: 'hard-light' },
               { text: '差', value: 'difference' },
               { text: '除外', value: 'exclusion' }
+            ]
+          },
+textureModes: {
+            acceptReporters: false,
+            items: [
+              { text: '引き延ばし', value: 'stretch' },
+              { text: '繰り返し', value: 'repeat' }
             ]
           },
           enableOptions: {
@@ -2763,6 +2884,49 @@ async clearObjectTexture(args) {
             }
         }
       });
+    }
+
+async setObjectTexture(args) {
+      if (!this.isInitialized || typeof THREE === 'undefined') return;
+      
+      const id = Scratch.Cast.toNumber(args.ID);
+      const url = Scratch.Cast.toString(args.URL);
+      const obj = this.objects.get(id);
+      
+      // スタンス通り：単体生成されたオブジェクト(Mesh)のみを対象とし、外部モデル(Group等)は無視する
+      if (!obj || !obj.isMesh) {
+        console.warn(`オブジェクト ${id} は単体Meshではないため、テクスチャ適用をスキップしました。`);
+        return;
+      }
+
+      try {
+        const loader = new THREE.TextureLoader();
+        // 外部の画像URLを読み込むためにCORS設定を許可
+        loader.setCrossOrigin('anonymous'); 
+        
+        const texture = await new Promise((resolve, reject) => {
+          loader.load(url, resolve, undefined, reject);
+        });
+
+        // PS1風などのローポリ・ドット絵テクスチャをボヤけさせず「くっきり」させたい場合は
+        // 以下の2行のコメントアウトを外すと、NearestFilterがかかってレトロ感が出ます。
+        // texture.magFilter = THREE.NearestFilter;
+        // texture.minFilter = THREE.NearestFilter;
+
+        // 他のオブジェクトとマテリアルを共有してしまわないようにクローンする
+        if (!obj.material.isMaterial || !obj.material.userData.isClonedForTexture) {
+           obj.material = obj.material.clone();
+           obj.material.userData.isClonedForTexture = true;
+        }
+
+        // デフォルトのUVマッピングにそのまま放り込む（無理やり引き伸ばす）
+        obj.material.map = texture;
+        obj.material.needsUpdate = true;
+        
+        console.log(`オブジェクト ${id} にテクスチャを適用しました`);
+      } catch (error) {
+        console.error(`テクスチャの読み込みに失敗しました: ${url}`, error);
+      }
     }
 
     setObjectOpacity(args) {
